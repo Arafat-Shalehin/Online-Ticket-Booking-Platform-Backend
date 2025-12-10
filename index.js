@@ -25,6 +25,39 @@ async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
+
+    const db = client.db("Ticket-Booking-Platform");
+
+    const ticketsCollection = db.collection("allTickets");
+    const adminCollection = db.collection("allAdmin");
+    const vendorCollection = db.collection("allVendor");
+    const userCollection = db.collection("allUser");
+
+    app.get("/sixTickets", async (req, res) => {
+      try {
+        const result = await ticketsCollection
+          .find({ adminApprove: true })
+          .limit(6)
+          .toArray();
+
+        // If no tickets found
+        if (!result.length) {
+          return res.status(404).json({
+            message: "No admin-approved tickets found.",
+          });
+        }
+
+        return res.status(200).json(result);
+      } catch (error) {
+        console.error("Error fetching six tickets:", error);
+
+        return res.status(500).json({
+          message: "Internal server error.",
+          error: error.message,
+        });
+      }
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
