@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const app = express();
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require("dotenv").config();
 const port = process.env.PORT || 3000;
 
@@ -130,7 +130,7 @@ async function run() {
 
         // If no tickets found
         if (!result.length) {
-          return res.status(404).json([],{
+          return res.status(404).json([], {
             message: "No admin-approved tickets found.",
           });
         }
@@ -143,6 +143,31 @@ async function run() {
           message: "Internal server error.",
           error: error.message,
         });
+      }
+    });
+
+    app.get("/ticket/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        // Validate ObjectId format
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid ticket ID format" });
+        }
+
+        const query = { _id: new ObjectId(id) };
+
+        // findOne returns the document directly (NOT a cursor)
+        const ticket = await ticketsCollection.findOne(query);
+
+        if (!ticket) {
+          return res.status(404).send({ message: "Ticket not found" });
+        }
+
+        res.status(200).send(ticket);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Server error occurred" });
       }
     });
 
