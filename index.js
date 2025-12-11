@@ -29,9 +29,60 @@ async function run() {
     const db = client.db("Ticket-Booking-Platform");
 
     const ticketsCollection = db.collection("allTickets");
-    const adminCollection = db.collection("allAdmin");
-    const vendorCollection = db.collection("allVendor");
-    const userCollection = db.collection("allUser");
+    const usersCollection = db.collection("allUsers");
+
+    app.get("/users/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+
+        const user = await usersCollection.findOne({ email: email });
+
+        if (!user) {
+          return res.status(404).json({ message: "User not found." });
+        }
+
+        res.status(200).json(user);
+      } catch (error) {
+        console.error("GET /users/:email error:", error);
+        res.status(500).json({ message: "Internal Server Error." });
+      }
+    });
+
+    app.post("/registerUsers", async (req, res) => {
+      try {
+        const { name, email, photoURL } = req.body;
+
+        if (!email) {
+          return res.status(400).json({ message: "Email is required" });
+        }
+
+        // Check if user already exists
+        const existingUser = await usersCollection.findOne({ email });
+        if (existingUser) {
+          return res.status(200).json(existingUser);
+        }
+
+        const newUser = {
+          name,
+          email,
+          photoURL,
+          role: "user", // default role
+          createdAt: new Date(),
+        };
+
+        const result = await usersCollection.insertOne(newUser);
+
+        // Return saved user
+        // res.status(201).json({ ...newUser, _id: result.insertedId });
+        const savedUser = await usersCollection.findOne({
+          _id: result.insertedId,
+        });
+        res.status(201).json(savedUser);
+      } catch (error) {
+        console.error("User creation failed:", error);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
 
     app.get("/sixTickets", async (req, res) => {
       try {
