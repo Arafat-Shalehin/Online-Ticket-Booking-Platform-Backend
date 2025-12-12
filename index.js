@@ -30,6 +30,7 @@ async function run() {
 
     const ticketsCollection = db.collection("allTickets");
     const usersCollection = db.collection("allUsers");
+    const usersBookingCollection = db.collection("userBookingTickets");
 
     app.get("/users/:email", async (req, res) => {
       try {
@@ -219,6 +220,105 @@ async function run() {
       } catch (error) {
         console.error(error);
         res.status(500).send({ message: "Server error occurred" });
+      }
+    });
+
+    // APIs for Booking Tickets related
+    app.post("/bookingTicket/:ticketId", async (req, res) => {
+      try {
+        const ticketId = req.params.ticketId;
+        const { quantity, status, userEmail } = req.body;
+        // console.log({quantity, status, userEmail});
+
+        if (!ticketId || !quantity) {
+          return res.status(400).send({
+            success: false,
+            message: "Ticket ID and quantity are required.",
+          });
+        }
+
+        const ticket = await ticketsCollection.findOne({
+          _id: new ObjectId(ticketId),
+        });
+
+        if (!ticket) {
+          return res.status(404).send({
+            success: false,
+            message: "Ticket not found.",
+          });
+        }
+
+        // Validate quantity
+        if (quantity > ticket.quantity) {
+          return res.status(400).send({
+            success: false,
+            message: `Only ${ticket.quantity} tickets available.`,
+          });
+        }
+
+        // Build booking document
+        const bookingData = {
+          ticketId: ticket._id,
+          userEmail,
+          title: ticket.title,
+          image: ticket.image,
+          unitPrice: ticket.price,
+          bookedQuantity: quantity,
+          totalPrice: ticket.price * quantity,
+          from: ticket.from,
+          to: ticket.to,
+          departureTime: ticket.departureTime,
+          status: status || "Pending",
+          createdAt: new Date(),
+          countdownEnd: ticket.departureTime,
+          paymentIntentId: null, // will be added after Stripe payment
+        };
+
+        // Insert booking
+        const insertResult = await usersBookingCollection.insertOne(
+          bookingData
+        );
+
+        return res.send({
+          success: true,
+          message:
+            "Booking created successfully and is pending, waiting for approval.",
+          bookingId: insertResult.insertedId,
+        });
+      } catch (error) {
+        console.error("Booking error:", error);
+
+        return res.status(500).send({
+          success: false,
+          message: "Internal server error while booking ticket.",
+        });
+      }
+    });
+
+    app.get("/bookedTickets", async (req, res) => {
+      try {
+        const { email, status } = req.query;
+        // console.log({ email, status });
+
+        // Build dynamic filter
+        const filter = {};
+        if (email) filter.userEmail = email;
+        if (status) filter.status = status;
+
+        // Fetch bookings
+        const cursor = usersBookingCollection.find(filter);
+        const tickets = await cursor.toArray();
+        // console.log(tickets);
+
+        // Respond
+        return res.status(200).send(tickets);
+      } catch (error) {
+        console.error("Error fetching booked tickets:", error);
+
+        return res.status(500).send({
+          success: false,
+          message: "Internal server error while fetching booked tickets.",
+        });
       }
     });
 
