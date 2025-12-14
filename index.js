@@ -2,12 +2,30 @@ const express = require("express");
 const cors = require("cors");
 const app = express();
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const admin = require("firebase-admin");
+const serviceAccount = require("./online-ticket-booking-platform-key.json");
 require("dotenv").config();
 const port = process.env.PORT || 3000;
 
 // Middlewares
 app.use(express.json());
 app.use(cors());
+
+const verifyFBToken = async (req, res, next) => {
+  const token = req.headers.authorization;
+  if (!token) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+
+  try {
+    const idToken = token.split(" ")[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    req.decoded_email = decoded.email;
+    next();
+  } catch (error) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+};
 
 // MongoDB URL
 const uri = process.env.MONGODB_URI;
@@ -21,6 +39,11 @@ const client = new MongoClient(uri, {
   },
 });
 
+// Firebase initializeApp
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
@@ -32,6 +55,7 @@ async function run() {
     const usersCollection = db.collection("allUsers");
     const usersBookingCollection = db.collection("userBookingTickets");
 
+    // APIS to add user in DB
     app.get("/users/:email", async (req, res) => {
       try {
         const email = req.params.email;
@@ -85,6 +109,7 @@ async function run() {
       }
     });
 
+    // APIS for home sections
     app.get("/sixTickets", async (req, res) => {
       try {
         const result = await ticketsCollection
@@ -163,6 +188,7 @@ async function run() {
       }
     });
 
+    // APIS for all and specific tickets
     app.get("/allTickets", async (req, res) => {
       try {
         const result = await ticketsCollection
@@ -319,6 +345,154 @@ async function run() {
           success: false,
           message: "Internal server error while fetching booked tickets.",
         });
+      }
+    });
+
+    // Vendors APIs
+
+    // Add Tickets
+    app.post("/ticket", async (req, res) => {
+      try {
+        const ticket = req.body;
+
+        const departureDate = new Date(ticket.departureDateTime);
+
+        if (isNaN(departureDate.getTime())) {
+          return res.status(400).send({
+            success: false,
+            message: "Invalid departure date format",
+          });
+        }
+
+        const doc = {
+          ...ticket,
+          departureDateTime: departureDate,
+          verificationStatus: "pending",
+          createdAt: new Date(),
+        };
+
+        const result = await ticketsCollection.insertOne(doc);
+        res.send(result);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Failed to add ticket" });
+      }
+    });
+
+    // Vendor added Tickets
+    app.get("/tickets/vendor", async (req, res) => {
+      try {
+        const emailFromQuery = req.query.email;
+
+        // Security: vendor can only see their own tickets
+        const vendorEmail = emailFromQuery;
+        if (!vendorEmail) {
+          return res.status(400).send({ message: "Vendor email is required" });
+        }
+
+        const cursor = ticketsCollection
+          .find({ vendorEmail })
+          .sort({ createdAt: -1 }); // optional sorting
+        const tickets = await cursor.toArray();
+
+        res.send(tickets);
+      } catch (error) {
+        console.error("Error fetching vendor tickets:", error);
+        res.status(500).send({ message: "Failed to fetch tickets" });
+      }
+    });
+
+    // Vendor Delete Tickets
+    app.delete("/tickets/:id", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const vendorEmail = req.decoded_email;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid ticket id" });
+        }
+
+        const query = { _id: new ObjectId(id) };
+        const ticket = await ticketsCollection.findOne(query);
+
+        if (!ticket) {
+          return res.status(404).send({ message: "Ticket not found" });
+        }
+
+        // Ownership check: vendor can only delete their own ticket
+        if (ticket.vendorEmail !== vendorEmail) {
+          return res
+            .status(403)
+            .send({ message: "You can only delete your own tickets" });
+        }
+
+        // Optional (to match your UI rule strictly): block delete if rejected
+        if (ticket.verificationStatus === "rejected") {
+          return res
+            .status(400)
+            .send({ message: "Rejected tickets cannot be deleted" });
+        }
+
+        const result = await ticketsCollection.deleteOne(query);
+
+        res.send({ data: result, deletedCount: result.deletedCount });
+      } catch (error) {
+        console.error("Error deleting ticket:", error);
+        res.status(500).send({ message: "Failed to delete ticket" });
+      }
+    });
+
+    // Vendor Update Tickets
+    app.patch("/tickets/:id", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const vendorEmail = req.decoded_email;
+        const updates = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid ticket id" });
+        }
+
+        const query = { _id: new ObjectId(id) };
+        const ticket = await ticketsCollection.findOne(query);
+
+        if (!ticket) {
+          return res.status(404).send({ message: "Ticket not found" });
+        }
+
+        // Ownership check
+        if (ticket.vendorEmail !== vendorEmail) {
+          return res
+            .status(403)
+            .send({ message: "You can only update your own tickets" });
+        }
+
+        if (ticket.verificationStatus === "rejected") {
+          return res
+            .status(400)
+            .send({ message: "Rejected tickets cannot be updated" });
+        }
+
+        // Won't let vendor change protected fields.
+        delete updates.vendorEmail;
+        delete updates.vendorName;
+        delete updates.verificationStatus;
+        delete updates.isAdvertised;
+        delete updates.isHiddenForFraud;
+
+        const updateDoc = {
+          $set: {
+            ...updates,
+            updatedAt: new Date(),
+          },
+        };
+
+        const result = await ticketsCollection.updateOne(query, updateDoc);
+
+        res.send(result);
+      } catch (error) {
+        console.error("Error updating ticket:", error);
+        res.status(500).send({ message: "Failed to update ticket" });
       }
     });
 
