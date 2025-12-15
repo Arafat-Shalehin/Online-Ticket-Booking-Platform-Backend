@@ -55,6 +55,26 @@ async function run() {
     const usersCollection = db.collection("allUsers");
     const usersBookingCollection = db.collection("userBookingTickets");
 
+    // Admin Middleware
+    const verifyAdmin = async (req, res, next) => {
+      try {
+        const email = req.decoded_email;
+        if (!email) {
+          return res.status(401).send({ message: "unauthorized access" });
+        }
+
+        const user = await usersCollection.findOne({ email });
+        if (!user || user.role !== "admin") {
+          return res.status(403).send({ message: "forbidden" });
+        }
+
+        next();
+      } catch (error) {
+        console.error("verifyAdmin error:", error);
+        return res.status(500).send({ message: "Internal server error" });
+      }
+    };
+
     // APIS to add user in DB
     app.get("/users/:email", async (req, res) => {
       try {
@@ -671,6 +691,95 @@ async function run() {
         res.status(500).send({ message: "Failed to fetch vendor statistics" });
       }
     });
+
+    // Admin APIs
+
+    // All tickets added by vendors (for admin to manage)
+    app.get("/tickets/admin", verifyFBToken, verifyAdmin, async (req, res) => {
+      try {
+        const cursor = ticketsCollection.find({}).sort({ createdAt: -1 }); // newest first
+
+        const tickets = await cursor.toArray();
+        res.send(tickets);
+      } catch (error) {
+        console.error("Error fetching admin tickets:", error);
+        res.status(500).send({ message: "Failed to fetch tickets" });
+      }
+    });
+
+    // Admin approves a ticket.
+    app.patch(
+      "/tickets/:id/approve",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).send({ message: "Invalid ticket id" });
+          }
+
+          const query = { _id: new ObjectId(id) };
+          const ticket = await ticketsCollection.findOne(query);
+
+          if (!ticket) {
+            return res.status(404).send({ message: "Ticket not found" });
+          }
+
+          const updateDoc = {
+            $set: {
+              adminApprove: true,
+              verificationStatus: "approved",
+              updatedAt: new Date(),
+            },
+          };
+
+          const result = await ticketsCollection.updateOne(query, updateDoc);
+          res.send(result);
+        } catch (error) {
+          console.error("Error approving ticket:", error);
+          res.status(500).send({ message: "Failed to approve ticket" });
+        }
+      }
+    );
+
+    // Admin rejects a ticket.
+    app.patch(
+      "/tickets/:id/reject",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).send({ message: "Invalid ticket id" });
+          }
+
+          const query = { _id: new ObjectId(id) };
+          const ticket = await ticketsCollection.findOne(query);
+
+          if (!ticket) {
+            return res.status(404).send({ message: "Ticket not found" });
+          }
+
+          const updateDoc = {
+            $set: {
+              adminApprove: false,
+              verificationStatus: "rejected",
+              updatedAt: new Date(),
+            },
+          };
+
+          const result = await ticketsCollection.updateOne(query, updateDoc);
+          res.send(result);
+        } catch (error) {
+          console.error("Error rejecting ticket:", error);
+          res.status(500).send({ message: "Failed to reject ticket" });
+        }
+      }
+    );
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
