@@ -253,7 +253,7 @@ async function run() {
     app.post("/bookingTicket/:ticketId", async (req, res) => {
       try {
         const ticketId = req.params.ticketId;
-        const { quantity, status, userEmail } = req.body;
+        const { quantity, status, userName, userEmail, vendorEmail } = req.body;
         // console.log({quantity, status, userEmail});
 
         if (!ticketId || !quantity) {
@@ -284,21 +284,24 @@ async function run() {
 
         // Build booking document
         const bookingData = {
-          ticketId: ticket._id,
-          userEmail,
-          title: ticket.title,
           image: ticket.image,
+          ticketId: ticket._id,
+          userName,
+          userEmail,
+          vendorEmail,
+          title: ticket.title,
           unitPrice: ticket.price,
           bookedQuantity: quantity,
           totalPrice: ticket.price * quantity,
           from: ticket.from,
           to: ticket.to,
           departureTime: ticket.departureTime,
-          status: status || "Pending",
+          status: (status || "pending").toLowerCase(),
           createdAt: new Date(),
-          countdownEnd: ticket.departureTime,
           paymentIntentId: null, // will be added after Stripe payment
         };
+
+        console.log(bookingData);
 
         // Insert booking
         const insertResult = await usersBookingCollection.insertOne(
@@ -493,6 +496,125 @@ async function run() {
       } catch (error) {
         console.error("Error updating ticket:", error);
         res.status(500).send({ message: "Failed to update ticket" });
+      }
+    });
+
+    // Vendor Own Ticket Booking request
+    app.get("/bookings/vendor", verifyFBToken, async (req, res) => {
+      try {
+        const emailFromQuery = req.query.email;
+        const emailFromToken = req.decoded_email;
+
+        // console.log({ emailFromQuery, emailFromToken });
+
+        const vendorEmail = emailFromQuery || emailFromToken;
+        if (!vendorEmail) {
+          return res.status(400).send({ message: "Vendor email is required" });
+        }
+
+        if (emailFromQuery && emailFromQuery !== emailFromToken) {
+          return res.status(403).send({ message: "forbidden" });
+        }
+
+        // Only pending booking requests
+        const query = { vendorEmail, status: "pending" };
+        const cursor = usersBookingCollection
+          .find(query)
+          .sort({ createdAt: -1 }); // newest first
+
+        const bookings = await cursor.toArray();
+        console.log(bookings);
+        res.send(bookings);
+      } catch (error) {
+        console.error("Error fetching vendor bookings:", error);
+        res.status(500).send({ message: "Failed to fetch bookings" });
+      }
+    });
+
+    app.patch("/bookings/:id/accept", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const vendorEmail = req.decoded_email;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid booking id" });
+        }
+
+        const query = { _id: new ObjectId(id) };
+        const booking = await usersBookingCollection.findOne(query);
+
+        if (!booking) {
+          return res.status(404).send({ message: "Booking not found" });
+        }
+
+        // Ownership: ensure this booking belongs to the current vendor
+        if (booking.vendorEmail !== vendorEmail) {
+          return res
+            .status(403)
+            .send({ message: "You can only manage your own bookings" });
+        }
+
+        if (booking.status !== "pending") {
+          return res
+            .status(400)
+            .send({ message: "Only pending bookings can be accepted" });
+        }
+
+        const updateDoc = {
+          $set: {
+            status: "accepted",
+            updatedAt: new Date(),
+          },
+        };
+
+        const result = await usersBookingCollection.updateOne(query, updateDoc);
+        res.send(result);
+      } catch (error) {
+        console.error("Error accepting booking:", error);
+        res.status(500).send({ message: "Failed to accept booking" });
+      }
+    });
+
+    app.patch("/bookings/:id/reject", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const vendorEmail = req.decoded_email;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid booking id" });
+        }
+
+        const query = { _id: new ObjectId(id) };
+        const booking = await usersBookingCollection.findOne(query);
+
+        if (!booking) {
+          return res.status(404).send({ message: "Booking not found" });
+        }
+
+        if (booking.vendorEmail !== vendorEmail) {
+          return res
+            .status(403)
+            .send({ message: "You can only manage your own bookings" });
+        }
+
+        if (booking.status !== "pending") {
+          return res
+            .status(400)
+            .send({ message: "Only pending bookings can be rejected" });
+        }
+
+        const updateDoc = {
+          $set: {
+            status: "rejected",
+            updatedAt: new Date(),
+          },
+        };
+
+        const result = await usersBookingCollection.updateOne(query, updateDoc);
+        res.send(result);
+      } catch (error) {
+        console.error("Error rejecting booking:", error);
+        res.status(500).send({ message: "Failed to reject booking" });
       }
     });
 
