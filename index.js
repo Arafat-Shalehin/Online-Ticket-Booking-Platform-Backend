@@ -618,6 +618,60 @@ async function run() {
       }
     });
 
+    // Revenue Overview for a vendor
+    app.get("/stats/vendor", verifyFBToken, async (req, res) => {
+      try {
+        const emailFromQuery = req.query.email;
+        const emailFromToken = req.decoded_email;
+
+        const vendorEmail = emailFromQuery || emailFromToken;
+
+        if (!vendorEmail) {
+          return res.status(400).send({ message: "Vendor email is required" });
+        }
+
+        if (emailFromQuery && emailFromQuery !== emailFromToken) {
+          return res.status(403).send({ message: "forbidden" });
+        }
+
+        const agg = await usersBookingCollection
+          .aggregate([
+            {
+              $match: {
+                vendorEmail,
+                status: "paid", // Will work on this after implemented stripe
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                totalRevenue: { $sum: "$totalPrice" },
+                totalTicketsSold: { $sum: "$bookedQuantity" },
+              },
+            },
+          ])
+          .toArray();
+
+        const totalRevenueRaw = agg[0]?.totalRevenue || 0;
+        const totalTicketsSold = agg[0]?.totalTicketsSold || 0;
+
+        const totalRevenue = Math.round(totalRevenueRaw * 100) / 100;
+
+        const totalTicketsAdded = await ticketsCollection.countDocuments({
+          vendorEmail,
+        });
+
+        res.send({
+          totalRevenue,
+          totalTicketsSold,
+          totalTicketsAdded,
+        });
+      } catch (error) {
+        console.error("Error fetching vendor stats:", error);
+        res.status(500).send({ message: "Failed to fetch vendor statistics" });
+      }
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
