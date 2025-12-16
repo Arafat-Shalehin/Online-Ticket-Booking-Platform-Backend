@@ -11,16 +11,23 @@ const port = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
+// Stripe Stuff
+const stripe = require("stripe")(process.env.STRIPE_SECRET);
+
+// MiddleWares
 const verifyFBToken = async (req, res, next) => {
-  const token = req.headers.authorization;
+  // console.log("This hit");
+  const token = req?.headers?.authorization;
+  // console.log(token);
   if (!token) {
     return res.status(401).send({ message: "unauthorized access" });
   }
 
   try {
-    const idToken = token.split(" ")[1];
+    const idToken = token?.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
-    req.decoded_email = decoded.email;
+    // console.log(decoded);
+    req.decoded_email = decoded?.email;
     next();
   } catch (error) {
     return res.status(401).send({ message: "unauthorized access" });
@@ -54,6 +61,7 @@ async function run() {
     const ticketsCollection = db.collection("allTickets");
     const usersCollection = db.collection("allUsers");
     const usersBookingCollection = db.collection("userBookingTickets");
+    const paymentCollection = db.collection("payments");
 
     // Admin Middleware
     const verifyAdmin = async (req, res, next) => {
@@ -269,40 +277,65 @@ async function run() {
       }
     });
 
-    // APIs for Booking Tickets related
-    app.post("/bookingTicket/:ticketId", async (req, res) => {
+    // APIs for Booking Ticket
+    app.post("/bookingTicket/:ticketId", verifyFBToken, async (req, res) => {
       try {
         const ticketId = req.params.ticketId;
         const { quantity, status, userName, userEmail, vendorEmail } = req.body;
-        // console.log({quantity, status, userEmail});
 
-        if (!ticketId || !quantity) {
+        if (!ticketId || quantity == null) {
           return res.status(400).send({
             success: false,
             message: "Ticket ID and quantity are required.",
           });
         }
 
+        if (!ObjectId.isValid(ticketId)) {
+          return res.status(400).send({
+            success: false,
+            message: "Invalid ticket ID format.",
+          });
+        }
+
+        const bookingQuantity = Number(quantity);
+        if (!Number.isFinite(bookingQuantity) || bookingQuantity <= 0) {
+          return res.status(400).send({
+            success: false,
+            message: "Quantity must be a positive number.",
+          });
+        }
+
         const ticket = await ticketsCollection.findOne({
           _id: new ObjectId(ticketId),
+          verificationStatus: "approved",
+          adminApprove: true,
         });
 
         if (!ticket) {
           return res.status(404).send({
             success: false,
-            message: "Ticket not found.",
+            message: "Ticket not found or not available for booking.",
           });
         }
 
-        // Validate quantity
-        if (quantity > ticket.quantity) {
+        const availableQty = ticket.ticketQuantity ?? 0;
+        if (bookingQuantity > availableQty) {
           return res.status(400).send({
             success: false,
-            message: `Only ${ticket.quantity} tickets available.`,
+            message: `Only ${availableQty} tickets available.`,
           });
         }
 
-        // Build booking document
+        const now = new Date();
+        const departure = ticket.departureDateTime;
+        if (!departure || new Date(departure) <= now) {
+          return res.status(400).send({
+            success: false,
+            message:
+              "This ticket is no longer available (departure has passed).",
+          });
+        }
+
         const bookingData = {
           image: ticket.image,
           ticketId: ticket._id,
@@ -311,19 +344,16 @@ async function run() {
           vendorEmail,
           title: ticket.title,
           unitPrice: ticket.price,
-          bookedQuantity: quantity,
-          totalPrice: ticket.price * quantity,
+          bookedQuantity: bookingQuantity,
+          totalPrice: ticket.price * bookingQuantity,
           from: ticket.from,
           to: ticket.to,
-          departureTime: ticket.departureTime,
+          departureDateTime: ticket.departureDateTime,
           status: (status || "pending").toLowerCase(),
           createdAt: new Date(),
-          paymentIntentId: null, // will be added after Stripe payment
+          updatedAt: new Date(),
         };
 
-        console.log(bookingData);
-
-        // Insert booking
         const insertResult = await usersBookingCollection.insertOne(
           bookingData
         );
@@ -368,6 +398,232 @@ async function run() {
           success: false,
           message: "Internal server error while fetching booked tickets.",
         });
+      }
+    });
+
+    // Payment related APIS
+    // Get single booking (for payment page, etc.)
+    app.get("/bookings/:id", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const userEmail = req.decoded_email;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid booking id" });
+        }
+
+        const query = { _id: new ObjectId(id) };
+        const booking = await usersBookingCollection.findOne(query);
+
+        if (!booking) {
+          return res.status(404).send({ message: "Booking not found" });
+        }
+
+        // Ensure user can only see their own booking
+        if (booking.userEmail !== userEmail) {
+          return res.status(403).send({ message: "forbidden" });
+        }
+
+        res.send(booking);
+      } catch (error) {
+        console.error("Error fetching booking:", error);
+        res.status(500).send({ message: "Failed to fetch booking" });
+      }
+    });
+
+    // Payment related info
+    app.post("/create-checkout-session", verifyFBToken, async (req, res) => {
+      try {
+        const { bookingId } = req.body;
+        const userEmailFromToken = req.decoded_email;
+
+        if (!ObjectId.isValid(bookingId)) {
+          return res.status(400).send({ message: "Invalid booking id" });
+        }
+
+        const booking = await usersBookingCollection.findOne({
+          _id: new ObjectId(bookingId),
+        });
+
+        if (!booking) {
+          return res.status(404).send({ message: "Booking not found" });
+        }
+
+        // Security: booking must belong to current user
+        if (booking.userEmail !== userEmailFromToken) {
+          return res.status(403).send({ message: "forbidden" });
+        }
+
+        // Only accepted bookings can be paid
+        if (booking.status !== "accepted") {
+          return res.status(400).send({
+            message: "Only accepted bookings can be paid.",
+          });
+        }
+
+        // Check departure still in future
+        const now = new Date();
+        const departure = booking.departureDateTime;
+        if (!departure || new Date(departure) <= now) {
+          return res.status(400).send({
+            message:
+              "Departure time has passed. Payment is no longer possible.",
+          });
+        }
+
+        const price = Number(booking.totalPrice);
+        if (!Number.isFinite(price) || price <= 0) {
+          return res.status(400).send({ message: "Invalid booking price" });
+        }
+
+        const amount = Math.round(price * 100);
+
+        const session = await stripe.checkout.sessions.create({
+          mode: "payment",
+          customer_email: booking.userEmail,
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                unit_amount: amount,
+                product_data: {
+                  name: booking.title,
+                },
+              },
+              quantity: 1,
+            },
+          ],
+          metadata: {
+            bookingId: booking._id.toString(),
+            ticketId: booking.ticketId.toString(),
+            ticketName: booking.title,
+            userEmail: booking.userEmail,
+            vendorEmail: booking.vendorEmail,
+          },
+          success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+        });
+
+        res.send({ url: session.url });
+      } catch (error) {
+        console.error("create-checkout-session error:", error);
+        res.status(500).send({ message: error.message });
+      }
+    });
+
+    // Payment check
+    app.patch("/payment-success", verifyFBToken, async (req, res) => {
+      try {
+        const sessionId = req.query.session_id;
+        if (!sessionId) {
+          return res.status(400).send({ message: "Missing session_id" });
+        }
+
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        // console.log("Session Retrieve", session);
+
+        if (session.payment_status !== "paid") {
+          return res.send({
+            success: false,
+            message: "Payment not completed.",
+          });
+        }
+
+        const transactionId = session.payment_intent;
+        const userEmailFromSession = session.customer_email;
+
+        const existingPayment = await paymentCollection.findOne({
+          transactionId,
+        });
+        if (existingPayment) {
+          return res.send({
+            success: true,
+            message: "Payment already processed.",
+            transactionId,
+            amount: existingPayment.amount,
+            title: existingPayment.title,
+          });
+        }
+
+        const bookingId = session.metadata?.bookingId;
+        const ticketId = session.metadata?.ticketId;
+
+        if (!bookingId || !ObjectId.isValid(bookingId)) {
+          return res
+            .status(400)
+            .send({ message: "Invalid or missing bookingId in metadata." });
+        }
+
+        // Find booking
+        const bookingQuery = { _id: new ObjectId(bookingId) };
+        const booking = await usersBookingCollection.findOne(bookingQuery);
+
+        if (!booking) {
+          return res.status(404).send({ message: "Booking not found." });
+        }
+
+        if (booking.userEmail !== userEmailFromSession) {
+          return res.status(403).send({ message: "Email mismatch." });
+        }
+
+        if (booking.status === "paid") {
+          return res.send({
+            success: true,
+            message: "Booking already marked as paid.",
+            transactionId,
+            amount: session.amount_total / 100,
+            title: booking.title,
+          });
+        }
+
+        // Mark booking as paid & save paymentIntentId
+        await usersBookingCollection.updateOne(bookingQuery, {
+          $set: {
+            status: "paid",
+            paymentIntentId: transactionId,
+            updatedAt: new Date(),
+          },
+        });
+
+        // 2) Reduce ticketQuantity
+        if (ticketId && ObjectId.isValid(ticketId)) {
+          await ticketsCollection.updateOne(
+            { _id: new ObjectId(ticketId) },
+            {
+              $inc: { ticketQuantity: -booking.bookedQuantity },
+              $set: { updatedAt: new Date() },
+            }
+          );
+        }
+
+        // 3) Save payment record (for Transaction History)
+        const paymentDoc = {
+          bookingId: booking._id,
+          ticketId: booking.ticketId,
+          title: booking.title,
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          userEmail: booking.userEmail,
+          vendorEmail: booking.vendorEmail,
+          transactionId,
+          paymentStatus: session.payment_status,
+          paidAt: new Date(),
+        };
+
+        const paymentResult = await paymentCollection.insertOne(paymentDoc);
+
+        res.send({
+          success: true,
+          transactionId,
+          amount: paymentDoc.amount,
+          title: paymentDoc.title,
+          paymentInfoId: paymentResult.insertedId,
+        });
+      } catch (error) {
+        console.error("payment-success error:", error);
+        res
+          .status(500)
+          .send({ success: false, message: "Payment confirmation failed." });
       }
     });
 
@@ -522,18 +778,26 @@ async function run() {
     // Vendor Own Ticket Booking request
     app.get("/bookings/vendor", verifyFBToken, async (req, res) => {
       try {
-        const emailFromQuery = req.query.email;
-        const emailFromToken = req.decoded_email;
+        console.log("Hit");
+        // const emailFromQuery = req.query.email;
+        // const emailFromToken = req.decoded_email;
 
         // console.log({ emailFromQuery, emailFromToken });
 
-        const vendorEmail = emailFromQuery || emailFromToken;
+        // const vendorEmail = emailFromQuery || emailFromToken;
+        // if (!vendorEmail) {
+        //   return res.status(400).send({ message: "Vendor email is required" });
+        // }
+
+        // if (emailFromQuery && emailFromQuery !== emailFromToken) {
+        //   return res.status(403).send({ message: "forbidden" });
+        // }
+
+        const vendorEmail = req.decoded_email; // ✅ always from token
+        console.log("Decoded vendorEmail:", vendorEmail);
+
         if (!vendorEmail) {
           return res.status(400).send({ message: "Vendor email is required" });
-        }
-
-        if (emailFromQuery && emailFromQuery !== emailFromToken) {
-          return res.status(403).send({ message: "forbidden" });
         }
 
         // Only pending booking requests
