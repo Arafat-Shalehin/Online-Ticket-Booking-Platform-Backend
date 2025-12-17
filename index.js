@@ -654,6 +654,33 @@ async function run() {
       }
     });
 
+    // Get all Stripe payments for the logged-in user
+    app.get("/payments/user", verifyFBToken, async (req, res) => {
+      try {
+        const emailFromQuery = req.query.email;
+        const emailFromToken = req.decoded_email;
+
+        const userEmail = emailFromQuery || emailFromToken;
+        if (!userEmail) {
+          return res.status(400).send({ message: "User email is required" });
+        }
+
+        if (emailFromQuery && emailFromQuery !== emailFromToken) {
+          return res.status(403).send({ message: "forbidden" });
+        }
+
+        const cursor = paymentCollection
+          .find({ userEmail })
+          .sort({ paidAt: -1 });
+
+        const payments = await cursor.toArray();
+        res.send(payments);
+      } catch (error) {
+        console.error("Error fetching user payments:", error);
+        res.status(500).send({ message: "Failed to fetch payments" });
+      }
+    });
+
     // Vendors APIs
 
     // Add Tickets
