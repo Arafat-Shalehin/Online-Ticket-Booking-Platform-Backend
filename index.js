@@ -174,34 +174,25 @@ async function run() {
       try {
         const result = await ticketsCollection
           .find(
-            { adminApprove: true },
+            {
+              adminApprove: true,
+              advertised: true,
+              isHiddenForFraud: { $ne: true },
+            },
             {
               projection: {
-                detailsLink: 0,
                 createdAt: 0,
                 vendorEmail: 0,
                 vendorName: 0,
-                advertised: 0,
-                from: 0,
-                to: 0,
-                departureTime: 0,
+                isHiddenForFraud: 0,
               },
             }
           )
           .limit(6)
           .toArray();
-
-        // If no tickets found
-        if (!result.length) {
-          return res.status(404).json({
-            message: "No admin-approved tickets found.",
-          });
-        }
-
         return res.status(200).json(result);
       } catch (error) {
         console.error("Error fetching six tickets:", error);
-
         return res.status(500).json({
           message: "Internal server error.",
           error: error.message,
@@ -1207,6 +1198,100 @@ async function run() {
         } catch (error) {
           console.error("Error marking vendor as fraud:", error);
           res.status(500).send({ message: "Failed to mark vendor as fraud" });
+        }
+      }
+    );
+
+    // Tickets that can be advertised
+    app.get(
+      "/tickets/advertise",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const cursor = ticketsCollection
+            .find({
+              adminApprove: true,
+              verificationStatus: "approved",
+            })
+            .sort({ createdAt: -1 });
+
+          const tickets = await cursor.toArray();
+          res.send(tickets);
+        } catch (error) {
+          console.error("Error fetching tickets for advertise:", error);
+          res.status(500).send({ message: "Failed to fetch tickets" });
+        }
+      }
+    );
+
+    // Toggle advertise/unadvertise for a ticket (Admin only)
+    app.patch(
+      "/tickets/:id/advertise",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const { advertised } = req.body;
+
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).send({ message: "Invalid ticket id" });
+          }
+
+          if (typeof advertised !== "boolean") {
+            return res
+              .status(400)
+              .send({ message: "Field 'advertised' must be boolean" });
+          }
+
+          const query = { _id: new ObjectId(id) };
+          const ticket = await ticketsCollection.findOne(query);
+
+          if (!ticket) {
+            return res.status(404).send({ message: "Ticket not found" });
+          }
+
+          // Must be admin-approved & not hidden for fraud
+          if (
+            !ticket.adminApprove ||
+            ticket.verificationStatus !== "approved"
+          ) {
+            return res
+              .status(400)
+              .send({ message: "Only approved tickets can be advertised" });
+          }
+
+          // If turning ON, check max 6 advertised
+          if (advertised === true) {
+            const advertisedCount = await ticketsCollection.countDocuments({
+              adminApprove: true,
+              verificationStatus: "approved",
+              advertised: true,
+            });
+
+            const alreadyAdvertised = ticket.advertised === true;
+            if (!alreadyAdvertised && advertisedCount >= 6) {
+              return res.status(400).send({
+                message: "Cannot advertise more than 6 tickets at a time.",
+              });
+            }
+          }
+
+          const updateDoc = {
+            $set: {
+              advertised,
+              updatedAt: new Date(),
+            },
+          };
+
+          const result = await ticketsCollection.updateOne(query, updateDoc);
+          res.send(result);
+        } catch (error) {
+          console.error("Error toggling advertise:", error);
+          res
+            .status(500)
+            .send({ message: "Failed to update advertise status" });
         }
       }
     );
