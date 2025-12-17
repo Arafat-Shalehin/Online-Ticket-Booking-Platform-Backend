@@ -431,11 +431,13 @@ async function run() {
         const id = req.params.id;
         const userEmail = req.decoded_email;
 
+        // console.log({ id, userEmail });
+
         if (!ObjectId.isValid(id)) {
           return res.status(400).send({ message: "Invalid booking id" });
         }
 
-        const query = { _id: new ObjectId(id) };
+        const query = { ticketId: new ObjectId(id) };
         const booking = await usersBookingCollection.findOne(query);
 
         if (!booking) {
@@ -457,15 +459,17 @@ async function run() {
     // Payment related info
     app.post("/create-checkout-session", verifyFBToken, async (req, res) => {
       try {
-        const { bookingId } = req.body;
+        const { ticketId } = req.body;
         const userEmailFromToken = req.decoded_email;
 
-        if (!ObjectId.isValid(bookingId)) {
+        // console.log({ ticketId, userEmailFromToken });
+
+        if (!ObjectId.isValid(ticketId)) {
           return res.status(400).send({ message: "Invalid booking id" });
         }
 
         const booking = await usersBookingCollection.findOne({
-          _id: new ObjectId(bookingId),
+          ticketId: new ObjectId(ticketId),
         });
 
         if (!booking) {
