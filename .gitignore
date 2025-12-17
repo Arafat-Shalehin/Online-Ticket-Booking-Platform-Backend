@@ -1,3 +1,4 @@
 node_modules
 .env
 online-ticket-booking-platform-key.json
+.vercel

@@ -270,31 +270,34 @@ npm run dev
 npm start
 
 # Default:
-# http://localhost:5000
+# http://online-icket-booking-platform-backe.vercel.app
 Ensure:
 
 MongoDB is running and MONGODB_URI is set.
 Stripe secret key and Firebase Admin credentials are correctly configured.
-Client is configured to call http://localhost:5000 and send the Firebase ID token in the Authorization header.
+Client is configured to call http://online-icket-booking-platform-backe.vercel.app and send the Firebase ID token in the Authorization header.
+
 🔒 CORS & Security
 cors() is enabled; you should restrict it to your frontend domain in production.
 All sensitive routes (bookings, payments, dashboard data) are protected with:
 verifyFBToken to validate Firebase ID token.
 Role-based middlewares: verifyAdmin, verifyVendor.
+
 ✅ Features Implemented (Backend Side)
-Secure Firebase ID token verification.
-Role-based access control for User, Vendor, Admin.
-Fraud vendor handling:
-Mark vendor as fraud.
-Hide all their tickets from the platform.
-Block them from adding tickets.
-Full booking lifecycle:
-Pending → Accepted/Rejected → Paid.
-Stripe checkout integration:
-Server-side session creation.
-Payment confirmation & idempotent logging.
-Vendor statistics & user transaction history.
-📄 License
+- Secure Firebase ID token verification.
+- Role-based access control for User, Vendor, Admin.
+- Fraud vendor handling:
+- Mark vendor as fraud.
+- Hide all their tickets from the platform.
+- Block them from adding tickets.
+- Full booking lifecycle:
+- Pending → Accepted/Rejected → Paid.
+- Stripe checkout integration:
+- Server-side session creation.
+- Payment confirmation & idempotent logging.
+- Vendor statistics & user transaction history.
+
+## 📄 License
 This backend is part of the TicketBari MERN assignment and is intended for educational and portfolio purposes.
 You may reuse patterns or snippets with attribution where appropriate.
 ```
