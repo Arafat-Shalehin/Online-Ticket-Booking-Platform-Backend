@@ -16,20 +16,23 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
 // MiddleWares
 const verifyFBToken = async (req, res, next) => {
-  // console.log("This hit");
-  const token = req?.headers?.authorization;
+  // console.log("FB Hit");
+  const token = req.headers.authorization || req.headers.Authorization;
   // console.log(token);
+
   if (!token) {
     return res.status(401).send({ message: "unauthorized access" });
   }
 
   try {
-    const idToken = token?.split(" ")[1];
+    const idToken = token.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
-    // console.log(decoded);
-    req.decoded_email = decoded?.email;
+    // console.log("decoded in the token", decoded);
+    // console.log("Decoded email:", decoded.email);
+
+    req.decoded_email = decoded.email;
     next();
-  } catch (error) {
+  } catch (err) {
     return res.status(401).send({ message: "unauthorized access" });
   }
 };
@@ -79,6 +82,35 @@ async function run() {
         next();
       } catch (error) {
         console.error("verifyAdmin error:", error);
+        return res.status(500).send({ message: "Internal server error" });
+      }
+    };
+
+    // Vendor Middleware
+    const verifyVendor = async (req, res, next) => {
+      try {
+        // console.log("Vendor Check Hit");
+        const email = req.decoded_email;
+        // console.log("Vendor email:", email);
+        if (!email) {
+          return res.status(401).send({ message: "unauthorized access" });
+        }
+
+        const user = await usersCollection.findOne({ email });
+        if (!user || user.role !== "vendor") {
+          return res.status(403).send({ message: "forbidden: not a vendor" });
+        }
+
+        if (user.isFraud) {
+          return res.status(403).send({
+            message: "This vendor is marked as fraud and cannot add tickets.",
+          });
+        }
+
+        req.vendor = user;
+        next();
+      } catch (error) {
+        console.error("verifyVendor error:", error);
         return res.status(500).send({ message: "Internal server error" });
       }
     };
@@ -221,7 +253,7 @@ async function run() {
       try {
         const result = await ticketsCollection
           .find(
-            { adminApprove: true },
+            { adminApprove: true, isHiddenForFraud: { $ne: true } },
             {
               projection: {
                 detailsLink: 0,
@@ -632,7 +664,9 @@ async function run() {
     // Add Tickets
     app.post("/ticket", async (req, res) => {
       try {
+        // console.log("Tic Hit");
         const ticket = req.body;
+        // console.log(ticket);
 
         const departureDate = new Date(ticket.departureDateTime);
 
@@ -645,8 +679,11 @@ async function run() {
 
         const doc = {
           ...ticket,
+          vendorEmail: ticket?.vendorEmail,
+          vendorName: ticket?.vendorName,
           departureDateTime: departureDate,
           verificationStatus: "pending",
+          isHiddenForFraud: false,
           createdAt: new Date(),
         };
 
@@ -662,6 +699,7 @@ async function run() {
     app.get("/tickets/vendor", async (req, res) => {
       try {
         const emailFromQuery = req.query.email;
+        // console.log(emailFromQuery);
 
         // Security: vendor can only see their own tickets
         const vendorEmail = emailFromQuery;
@@ -671,7 +709,7 @@ async function run() {
 
         const cursor = ticketsCollection
           .find({ vendorEmail })
-          .sort({ createdAt: -1 }); // optional sorting
+          .sort({ createdAt: -1 });
         const tickets = await cursor.toArray();
 
         res.send(tickets);
@@ -776,44 +814,30 @@ async function run() {
     });
 
     // Vendor Own Ticket Booking request
-    app.get("/bookings/vendor", verifyFBToken, async (req, res) => {
-      try {
-        console.log("Hit");
-        // const emailFromQuery = req.query.email;
-        // const emailFromToken = req.decoded_email;
+    app.get(
+      "/vendor/booking",
+      verifyFBToken,
+      verifyVendor,
+      async (req, res) => {
+        try {
+          const vendorEmail = req.vendor.email;
+          // console.log(vendorEmail);
 
-        // console.log({ emailFromQuery, emailFromToken });
+          const bookings = await usersBookingCollection
+            .find({
+              vendorEmail,
+              status: "pending",
+            })
+            .sort({ createdAt: -1 })
+            .toArray();
 
-        // const vendorEmail = emailFromQuery || emailFromToken;
-        // if (!vendorEmail) {
-        //   return res.status(400).send({ message: "Vendor email is required" });
-        // }
-
-        // if (emailFromQuery && emailFromQuery !== emailFromToken) {
-        //   return res.status(403).send({ message: "forbidden" });
-        // }
-
-        const vendorEmail = req.decoded_email; // ✅ always from token
-        console.log("Decoded vendorEmail:", vendorEmail);
-
-        if (!vendorEmail) {
-          return res.status(400).send({ message: "Vendor email is required" });
+          res.send(bookings);
+        } catch (error) {
+          console.error("Error fetching vendor bookings:", error);
+          res.status(500).send({ message: "Failed to fetch bookings" });
         }
-
-        // Only pending booking requests
-        const query = { vendorEmail, status: "pending" };
-        const cursor = usersBookingCollection
-          .find(query)
-          .sort({ createdAt: -1 }); // newest first
-
-        const bookings = await cursor.toArray();
-        console.log(bookings);
-        res.send(bookings);
-      } catch (error) {
-        console.error("Error fetching vendor bookings:", error);
-        res.status(500).send({ message: "Failed to fetch bookings" });
       }
-    });
+    );
 
     app.patch("/bookings/:id/accept", verifyFBToken, async (req, res) => {
       try {
@@ -1041,6 +1065,148 @@ async function run() {
         } catch (error) {
           console.error("Error rejecting ticket:", error);
           res.status(500).send({ message: "Failed to reject ticket" });
+        }
+      }
+    );
+
+    // Get all users (Admin only)
+    app.get("/users", verifyFBToken, verifyAdmin, async (req, res) => {
+      try {
+        const cursor = usersCollection.find({}).sort({ createdAt: -1 });
+        const users = await cursor.toArray();
+        res.send(users);
+      } catch (error) {
+        console.error("Error fetching users:", error);
+        res.status(500).send({ message: "Failed to fetch users" });
+      }
+    });
+
+    // Make a user Admin
+    app.patch(
+      "/users/:id/make-admin",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).send({ message: "Invalid user id" });
+          }
+
+          const query = { _id: new ObjectId(id) };
+          const user = await usersCollection.findOne(query);
+
+          if (!user) {
+            return res.status(404).send({ message: "User not found" });
+          }
+
+          const updateDoc = {
+            $set: {
+              role: "admin",
+              updatedAt: new Date(),
+            },
+          };
+
+          const result = await usersCollection.updateOne(query, updateDoc);
+          res.send(result);
+        } catch (error) {
+          console.error("Error making admin:", error);
+          res.status(500).send({ message: "Failed to update user role" });
+        }
+      }
+    );
+
+    // Make a user Vendor
+    app.patch(
+      "/users/:id/make-vendor",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).send({ message: "Invalid user id" });
+          }
+
+          const query = { _id: new ObjectId(id) };
+          const user = await usersCollection.findOne(query);
+
+          if (!user) {
+            return res.status(404).send({ message: "User not found" });
+          }
+
+          const updateDoc = {
+            $set: {
+              role: "vendor",
+              updatedAt: new Date(),
+            },
+          };
+
+          const result = await usersCollection.updateOne(query, updateDoc);
+          res.send(result);
+        } catch (error) {
+          console.error("Error making vendor:", error);
+          res.status(500).send({ message: "Failed to update user role" });
+        }
+      }
+    );
+
+    // Mark a vendor as fraud
+    app.patch(
+      "/users/:id/mark-fraud",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+
+          if (!ObjectId.isValid(id)) {
+            return res.status(400).send({ message: "Invalid user id" });
+          }
+
+          const query = { _id: new ObjectId(id) };
+          const user = await usersCollection.findOne(query);
+
+          if (!user) {
+            return res.status(404).send({ message: "User not found" });
+          }
+
+          if (user.role !== "vendor") {
+            return res
+              .status(400)
+              .send({ message: "Only vendors can be marked as fraud" });
+          }
+
+          // 1) Update user document (mark as fraud)
+          const userUpdateDoc = {
+            $set: {
+              isFraud: true,
+              updatedAt: new Date(),
+            },
+          };
+          await usersCollection.updateOne(query, userUpdateDoc);
+
+          // 2) Hide all tickets from this vendor
+          const ticketsUpdateDoc = {
+            $set: {
+              isHiddenForFraud: true,
+              updatedAt: new Date(),
+            },
+          };
+          const ticketsResult = await ticketsCollection.updateMany(
+            { vendorEmail: user.email },
+            ticketsUpdateDoc
+          );
+
+          res.send({
+            success: true,
+            modifiedTickets: ticketsResult.modifiedCount,
+          });
+        } catch (error) {
+          console.error("Error marking vendor as fraud:", error);
+          res.status(500).send({ message: "Failed to mark vendor as fraud" });
         }
       }
     );
